@@ -6,114 +6,124 @@ on:
     branches:
       - master
 
-name: tests
+name: CI
 env:
   CARGO_TERM_COLOR: always
-  MSRV: 1.86.0
 
 jobs:
+  config:
+    name: Configuring Rust Versions
+    runs-on: ubuntu-latest
+    outputs:
+      msrv: "1.86.0"                # Also update `rust-version` in `Cargo.toml`
+      stable: "1.93.0"              # Stable release as of 2026-02-10
+      nightly: nightly
+    steps:
+      - run: echo "Configuring Rust versions..."
+
   ci:
+    needs: config
+    name: Rust ${{ matrix.rust }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         rust:
-          - 1.91.1 # Stable release as of 2025-11-10
-          - $MSRV # MSRV
+          - ${{ needs.config.outputs.msrv }}
+          - ${{ needs.config.outputs.stable }}
+          - ${{ needs.config.outputs.nightly }}
 
     steps:
       - uses: actions/checkout@v6
-
       - uses: dtolnay/rust-toolchain@master
-        name: Setup rust toolchain
         with:
           toolchain: ${{ matrix.rust }}
           components: rustfmt, clippy
-
       - uses: Swatinem/rust-cache@v2
-        name: Load dependencies from cache
 
-      - name: Build with stable features
+      - name: Clippy (Stable Features)
+        if: matrix.rust == needs.config.outputs.stable
+        run: cargo clippy --workspace --all-targets --features stable -- -D warnings
+      - name: Build (Stable Features)
         run: cargo build --features stable
-
-      - name: Build with unstable features
-        if: ${{ matrix.rust == 'nightly' }}
-        run: cargo build --all-features
-
-      - name: Build with minimal features
-        run: cargo build --no-default-features
-
-      - name: Test with stable features
+      - name: Test (Stable Features)
         run: cargo test --features stable
 
-      - name: Test with minimal features
+      - name: Clippy (Default Features)
+        if: matrix.rust == needs.config.outputs.stable
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build (Default Features)
+        run: cargo build
+      - name: Test (Default Features)
+        run: cargo test
+
+      - name: Build (Minimal Features)
+        run: cargo build --no-default-features
+      - name: Test (Minimal Features)
         run: cargo test --no-default-features
 
-      - name: Check for non-standard formatting
-        if: ${{ matrix.rust == 'stable' }}
+      - name: Build (Unstable Features)
+        if: matrix.rust == needs.config.outputs.nightly
+        run: cargo build --all-features
+      - name: Test (Unstable Features)
+        if: matrix.rust == needs.config.outputs.nightly
+        run: cargo test --all-features
+
+      - name: Formatting
+        if: matrix.rust == needs.config.outputs.stable
         run: cargo fmt --all -- --check
 
-      - name: Check for clippy hints
-        if: ${{ matrix.rust == 'stable' }}
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      # This fails on 1.64, but works on 1.66 and later.
-      # https://github.com/rust-lang/rust/issues/103306
-      - name: Test run targeting WASI
-        if: ${{ matrix.rust == 'stable' }}
+      - name: Install wasmtime
+        if: matrix.rust == needs.config.outputs.stable
         run: |
           curl https://wasmtime.dev/install.sh -sSf | bash
-          source ~/.bashrc
-          export PATH=$HOME/.wasmtime/bin/:$PATH
-          cargo install cargo-wasi
-          cargo wasi bench --no-default-features -- --test
+          echo "$HOME/.wasmtime/bin" >> $GITHUB_PATH
+      - name: Test (WASI)
+        if: matrix.rust == needs.config.outputs.stable
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime run --dir . --
+        run: |
+          rustup target add wasm32-wasip1
+          cargo bench --target=wasm32-wasip1 --no-default-features -- --test
 
   nextest-compat:
+    needs: config
     name: Check compatibility with nextest
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        rust:
-          - stable
-
     steps:
       - uses: actions/checkout@v6
-
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ matrix.rust }}
-          components: rustfmt, clippy
-
+          toolchain: ${{ needs.config.outputs.stable }}
       - uses: Swatinem/rust-cache@v2
-
       - uses: taiki-e/install-action@nextest
-
       - run: ci/nextest-compat.sh
 
   # If this fails, consider changing your text or adding something to .typos.toml
   typos:
+    name: Check typos
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-
-      - name: check typos
-        uses: crate-ci/typos@v1.43.1
+      - uses: crate-ci/typos@v1.43.1
 
   # Make sure the library builds with all dependencies downgraded to their
   # oldest versions allowed by the semver spec. This ensures we have not
   # under-specified any dependency
   minimal-versions:
+    needs: config
+    name: Check Minimal Version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
       - name: Install needed Rust toolchain versions
         run: |
-          rustup install $MSRV
-          rustup install nightly
+          rustup toolchain install "${{ needs.config.outputs.msrv }}" --profile minimal
+          rustup toolchain install "${{ needs.config.outputs.nightly }}" --profile minimal
 
       - name: Downgrade dependencies to minimal versions
-        run: cargo +nightly update -Z minimal-versions
+        run: cargo "+${{ needs.config.outputs.nightly }}" update -Z minimal-versions
 
       - name: Compile with minimal versions
-        run: cargo +$MSRV build --all-targets --locked
+        run: cargo "+${{ needs.config.outputs.msrv }}" build --all-targets --locked

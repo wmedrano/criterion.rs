@@ -1007,6 +1007,9 @@ fn parse_version_utf8(output_bytes: &[u8]) -> Result<Version, VersionError> {
 }
 
 fn parse_version_utf16(output_bytes: &[u8]) -> Result<Version, VersionError> {
+    // The `is_multiple_of` is still unstable on 1.86.0 (MSRV)
+    #[allow(unknown_lints)]
+    #[allow(clippy::manual_is_multiple_of)]
     if output_bytes.len() % 2 != 0 {
         // Not an even number of bytes, so cannot be UTF-16.
         return Err(VersionError::OutputError);
